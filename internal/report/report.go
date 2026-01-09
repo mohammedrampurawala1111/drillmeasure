@@ -23,17 +23,23 @@ func GenerateMarkdownReport(result *runner.DrillResult) string {
 
 	// Summary
 	b.WriteString("## Summary\n\n")
-	b.WriteString("| Metric | Target | Actual | Status |\n")
-	b.WriteString("|--------|--------|--------|--------|\n")
+	b.WriteString("| Metric | Target (RTO) | Actual (RTA) | Status |\n")
+	b.WriteString("|--------|--------------|--------------|--------|\n")
 
-	rtoStatus := "❌ FAIL"
-	if result.RTOPassed {
-		rtoStatus = "✅ PASS"
+	if result.RTOStartTime.IsZero() {
+		// Service never went down
+		b.WriteString(fmt.Sprintf("| Recovery Time | %s | N/A (no downtime) | ✅ PASS |\n",
+			formatDuration(result.RTOTarget)))
+	} else {
+		rtoStatus := "❌ FAIL"
+		if result.RTOPassed {
+			rtoStatus = "✅ PASS"
+		}
+		b.WriteString(fmt.Sprintf("| Recovery Time | %s | %s | %s |\n",
+			formatDuration(result.RTOTarget),
+			formatDuration(result.RTA),
+			rtoStatus))
 	}
-	b.WriteString(fmt.Sprintf("| RTO | %s | %s | %s |\n",
-		formatDuration(result.RTOTarget),
-		formatDuration(result.RTOActual),
-		rtoStatus))
 
 	if result.RPOTarget > 0 {
 		rpoStatus := "❌ FAIL"
@@ -78,11 +84,19 @@ func GenerateMarkdownReport(result *runner.DrillResult) string {
 			formatDuration(result.Recover.Duration)))
 	}
 
-	b.WriteString(fmt.Sprintf("| RTO measurement start | %s | - |\n",
-		result.RTOStartTime.Format(time.RFC3339)))
-	b.WriteString(fmt.Sprintf("| RTO measurement end | %s | %s |\n",
-		result.RTOEndTime.Format(time.RFC3339),
-		formatDuration(result.RTOActual)))
+	// RTA end is shown after all other events
+	if !result.RTOStartTime.IsZero() {
+		b.WriteString(fmt.Sprintf("| RTA end (service healthy) | %s | %s |\n",
+			result.RTOEndTime.Format(time.RFC3339),
+			formatDuration(result.RTA)))
+		b.WriteString(fmt.Sprintf("| RTA (measured downtime) | - | %s |\n",
+			formatDuration(result.RTA)))
+		b.WriteString(fmt.Sprintf("| RTO (target) | - | %s |\n",
+			formatDuration(result.RTOTarget)))
+	} else {
+		b.WriteString("| RTA | Disruption did not cause downtime | N/A |\n")
+		b.WriteString(fmt.Sprintf("| RTO (target) | - | %s |\n", formatDuration(result.RTOTarget)))
+	}
 
 	if result.PostSnapshot != nil {
 		b.WriteString(fmt.Sprintf("| Post-snapshot | %s | %s |\n",
@@ -169,10 +183,14 @@ func GenerateMarkdownReport(result *runner.DrillResult) string {
 	b.WriteString("This drill measures Recovery Time Objective (RTO) and Recovery Point Objective (RPO) ")
 	b.WriteString("as part of disaster recovery and business continuity planning.\n\n")
 
-	if result.RTOPassed {
-		b.WriteString("- ✅ **RTO Compliance**: Service recovered within the target RTO.\n")
+	if result.RTOStartTime.IsZero() {
+		b.WriteString("- ✅ **RTO Compliance**: Disruption did not cause downtime - service remained healthy.\n")
+	} else if result.RTOPassed {
+		b.WriteString(fmt.Sprintf("- ✅ **RTO Compliance**: Service recovered within the target RTO (RTA: %s <= RTO: %s).\n",
+			formatDuration(result.RTA), formatDuration(result.RTOTarget)))
 	} else {
-		b.WriteString("- ❌ **RTO Compliance**: Service did not recover within the target RTO.\n")
+		b.WriteString(fmt.Sprintf("- ❌ **RTO Compliance**: Service did not recover within the target RTO (RTA: %s > RTO: %s).\n",
+			formatDuration(result.RTA), formatDuration(result.RTOTarget)))
 	}
 
 	if result.RPOTarget > 0 {
@@ -242,7 +260,7 @@ type ReportData struct {
 	StartTime         string                  `json:"start_time"`
 	EndTime           string                  `json:"end_time"`
 	RTOTarget         string                  `json:"rto_target"`
-	RTOActual         string                  `json:"rto_actual"`
+	RTA               string                  `json:"rta"`  // Recovery Time Actual
 	RTOPassed         bool                    `json:"rto_passed"`
 	RPOTarget         string                  `json:"rpo_target,omitempty"`
 	RPOPassed         bool                    `json:"rpo_passed,omitempty"`
@@ -276,7 +294,7 @@ func GenerateJSONReport(result *runner.DrillResult) (string, error) {
 		StartTime:         result.StartTime.Format(time.RFC3339),
 		EndTime:           result.EndTime.Format(time.RFC3339),
 		RTOTarget:         formatDuration(result.RTOTarget),
-		RTOActual:         formatDuration(result.RTOActual),
+		RTA:               formatDuration(result.RTA),
 		RTOPassed:         result.RTOPassed,
 		RPOPassed:         result.RPOPassed,
 		PostDisruptDelay:  formatDuration(result.PostDisruptDelay),

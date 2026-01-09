@@ -81,11 +81,16 @@ func runScenario(cmd *cobra.Command, args []string) error {
 
 	// Print summary
 	fmt.Println("Drill completed!")
-	fmt.Printf("RTO: %s (target: %s) - ", formatDuration(result.RTOActual), formatDuration(result.RTOTarget))
-	if result.RTOPassed {
-		fmt.Println("✅ PASS")
+	if result.RTOStartTime.IsZero() {
+		// Service never went down
+		fmt.Printf("Result: Disruption did not cause downtime - ✅ PASS (service remained healthy)\n")
 	} else {
-		fmt.Println("❌ FAIL")
+		fmt.Printf("RTA: %s (RTO target: %s) - ", formatDuration(result.RTA), formatDuration(result.RTOTarget))
+		if result.RTOPassed {
+			fmt.Println("✅ PASS")
+		} else {
+			fmt.Println("❌ FAIL")
+		}
 	}
 
 	if result.RPOTarget > 0 {

@@ -33,11 +33,11 @@ type DrillResult struct {
 	Disrupt           *CommandResult
 	Recover           *CommandResult
 	PostDisruptDelay  time.Duration
-	RTOStartTime      time.Time
-	RTOEndTime        time.Time
-	RTOActual         time.Duration
-	RTOTarget         time.Duration
-	RTOPassed         bool
+	RTOStartTime      time.Time  // When service actually went down (first failed health check)
+	RTOEndTime        time.Time  // When service recovered (first successful health check)
+	RTA               time.Duration  // Recovery Time Actual - measured downtime
+	RTOTarget         time.Duration  // Recovery Time Objective - maximum acceptable downtime
+	RTOPassed         bool  // Whether RTA <= RTOTarget
 	PostSnapshot      *CommandResult
 	RPOVerify         *CommandResult
 	RPOTarget         time.Duration
@@ -112,7 +112,19 @@ func (r *Runner) Run(ctx context.Context, scenario *config.Scenario) (*DrillResu
 		}
 	}
 
-	// Step 4: Recover (if recover_command is present)
+	// Step 4: Check health immediately after disruption to detect if service went down
+	// This establishes when RTA starts (when service actually goes down)
+	fmt.Println("Checking if disruption caused service downtime...")
+	postDisruptCheck := r.executeCommand(ctx, scenario.HealthCheckCommand)
+	result.HealthCheckAttempts = append(result.HealthCheckAttempts, *postDisruptCheck)
+	
+	if postDisruptCheck.ExitCode != 0 {
+		// Service is down - RTA starts now
+		result.RTOStartTime = postDisruptCheck.Timestamp
+		fmt.Printf("Service is down - RTA measurement started at %s\n", result.RTOStartTime.Format(time.RFC3339))
+	}
+
+	// Step 5: Recover (if recover_command is present)
 	if scenario.RecoverCommand != "" {
 		fmt.Println("Executing recovery command...")
 		result.Recover = r.executeCommand(ctx, scenario.RecoverCommand)
@@ -123,9 +135,10 @@ func (r *Runner) Run(ctx context.Context, scenario *config.Scenario) (*DrillResu
 		}
 	}
 
-	// Step 5: RTO measurement - wait for health check to pass
-	result.RTOStartTime = time.Now()
-	result.RTOPassed = r.waitForHealthCheck(ctx, scenario.HealthCheckCommand, rtoTarget, result)
+	// Step 6: RTA measurement - continue checking health until service recovers
+	// If RTA already started (service was down), continue until it's healthy
+	// If RTA hasn't started (service still healthy), wait for it to go down or stay healthy
+	r.waitForHealthCheck(ctx, scenario.HealthCheckCommand, rtoTarget, result)
 
 	// Step 6: Post-snapshot (if present)
 	if scenario.RPOCheck != nil && scenario.RPOCheck.PostSnapshot != "" {
@@ -158,7 +171,14 @@ func (r *Runner) Run(ctx context.Context, scenario *config.Scenario) (*DrillResu
 	}
 
 	result.EndTime = time.Now()
-	result.RTOEndTime = result.EndTime
+	// RTOEndTime is already set in waitForHealthCheck, but ensure it's set if we didn't run health checks
+	if result.RTOEndTime.IsZero() {
+		result.RTOEndTime = result.EndTime
+		if !result.RTOStartTime.IsZero() {
+			result.RTA = result.RTOEndTime.Sub(result.RTOStartTime)
+			result.RTOPassed = result.RTA <= result.RTOTarget
+		}
+	}
 
 	return result, nil
 }
@@ -215,20 +235,15 @@ func (r *Runner) executeCommand(ctx context.Context, command string) *CommandRes
 }
 
 // waitForHealthCheck repeatedly checks health until it passes or RTO target is exceeded
+// If RTA already started (RTOStartTime is set), continue checking until service recovers
+// If RTA hasn't started, check if service goes down or stays healthy
 func (r *Runner) waitForHealthCheck(ctx context.Context, healthCheckCommand string, rtoTarget time.Duration, result *DrillResult) bool {
-	deadline := result.RTOStartTime.Add(rtoTarget)
-	attemptNum := 0
+	// Check if RTA already started (service was detected as down after disruption)
+	rtaStarted := !result.RTOStartTime.IsZero()
+	attemptNum := len(result.HealthCheckAttempts)  // Continue from existing attempts
 
 	for {
-		// Check if we've exceeded RTO target
-		if time.Now().After(deadline) {
-			result.RTOActual = time.Since(result.RTOStartTime)
-			return false
-		}
-
 		attemptNum++
-		elapsed := time.Since(result.RTOStartTime)
-		fmt.Printf("[Health Check #%d] Attempting health check (elapsed: %s)...\n", attemptNum, formatDuration(elapsed))
 		
 		// Create timeout context for this health check
 		checkCtx, cancel := context.WithTimeout(ctx, r.healthCheckTimeout)
@@ -238,24 +253,63 @@ func (r *Runner) waitForHealthCheck(ctx context.Context, healthCheckCommand stri
 		result.HealthCheckAttempts = append(result.HealthCheckAttempts, *attempt)
 
 		if attempt.ExitCode == 0 {
-			result.RTOActual = time.Since(result.RTOStartTime)
-			result.RTOEndTime = time.Now()
-			fmt.Printf("[Health Check #%d] ✅ Service is healthy!\n", attemptNum)
-			return true
-		}
+			// Service is healthy
+			if rtaStarted {
+				// RTA ends when service becomes healthy again (first successful health check)
+				result.RTOEndTime = time.Now()
+				result.RTA = result.RTOEndTime.Sub(result.RTOStartTime)
+				// Compare RTA vs RTO target
+				result.RTOPassed = result.RTA <= rtoTarget
+				fmt.Printf("[Health Check #%d] ✅ Service is healthy! RTA: %s (target RTO: %s) - %s\n", 
+					attemptNum, formatDuration(result.RTA), formatDuration(rtoTarget), 
+					map[bool]string{true: "✅ PASS", false: "❌ FAIL"}[result.RTOPassed])
+				return result.RTOPassed
+			} else {
+				// Service never went down - disruption didn't cause downtime
+				result.RTOPassed = true  // No downtime means we passed
+				fmt.Printf("[Health Check #%d] ✅ Service is healthy (disruption did not cause downtime)\n", attemptNum)
+				return true
+			}
+		} else {
+			// Service is down
+			if !rtaStarted {
+				// RTA starts when service first goes down (shouldn't happen here if we checked after disruption)
+				result.RTOStartTime = attempt.Timestamp
+				rtaStarted = true
+				fmt.Printf("[Health Check #%d] ❌ Service is down - RTA measurement started\n", attemptNum)
+			}
 
-		fmt.Printf("[Health Check #%d] ❌ Health check failed (exit code: %d). Retrying in %s...\n", 
-			attemptNum, attempt.ExitCode, r.healthCheckInterval)
-		if attempt.Stderr != "" {
-			fmt.Printf("  Error: %s\n", strings.TrimSpace(attempt.Stderr))
-		}
+			// Check if we've exceeded RTO target (from when service went down)
+			now := time.Now()
+			deadline := result.RTOStartTime.Add(rtoTarget)
+			if now.After(deadline) {
+				result.RTA = now.Sub(result.RTOStartTime)
+				result.RTOEndTime = now
+				result.RTOPassed = false  // RTA exceeded RTO target
+				fmt.Printf("[Health Check #%d] ❌ RTO target exceeded! RTA: %s (target RTO: %s) - ❌ FAIL\n", 
+					attemptNum, formatDuration(result.RTA), formatDuration(rtoTarget))
+				return false
+			}
 
-		// Wait before next attempt
-		select {
-		case <-ctx.Done():
-			result.RTOActual = time.Since(result.RTOStartTime)
-			return false
-		case <-time.After(r.healthCheckInterval):
+			elapsed := now.Sub(result.RTOStartTime)
+			remaining := deadline.Sub(now)
+			fmt.Printf("[Health Check #%d] ❌ Health check failed (exit code: %d). RTA elapsed: %s, RTO remaining: %s. Retrying in %s...\n", 
+				attemptNum, attempt.ExitCode, formatDuration(elapsed), formatDuration(remaining), r.healthCheckInterval)
+			if attempt.Stderr != "" {
+				fmt.Printf("  Error: %s\n", strings.TrimSpace(attempt.Stderr))
+			}
+
+			// Wait before next attempt
+			select {
+			case <-ctx.Done():
+				if rtaStarted {
+					result.RTA = time.Since(result.RTOStartTime)
+					result.RTOEndTime = time.Now()
+					result.RTOPassed = result.RTA <= rtoTarget
+				}
+				return false
+			case <-time.After(r.healthCheckInterval):
+			}
 		}
 	}
 }

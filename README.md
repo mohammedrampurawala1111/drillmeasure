@@ -122,15 +122,24 @@ Durations use Go's time.Duration format:
 
 1. **Pre-snapshot** (if configured): Executes `rpo_check.pre_snapshot` command
 2. **Disruption**: Executes `disrupt_command` to simulate failure
-3. **Post-disrupt delay** (if configured): Waits for the specified duration
-4. **RTO Measurement**: 
-   - Starts timer
-   - Repeatedly runs `health_check_command` every 5 seconds
-   - Stops when health check passes or RTO target is exceeded
-5. **Post-snapshot** (if configured): Executes `rpo_check.post_snapshot` command
-6. **RPO Verification** (if configured): Executes `rpo_check.verify_command`
-7. **Factor Collection**: Executes all `factors.log_commands`
-8. **Report Generation**: Creates Markdown and JSON reports with full evidence
+3. **Post-disrupt delay** (if configured): Waits for the specified duration (captures propagation delay)
+4. **Recovery** (if configured): Executes `recover_command` to restore infrastructure
+5. **RTA Measurement** (Recovery Time Actual):
+   - **RTA Start**: First failed health check after disruption (when service actually goes down)
+   - **RTA End**: First successful health check (when service is fully recovered)
+   - Repeatedly runs `health_check_command` every 5 seconds (configurable)
+   - Each health check has a 5-minute timeout (configurable)
+   - Compares RTA vs RTO target → PASS/FAIL
+6. **Post-snapshot** (if configured): Executes `rpo_check.post_snapshot` command
+7. **RPO Verification** (if configured): Executes `rpo_check.verify_command`
+8. **Factor Collection**: Executes all `factors.log_commands` to capture influencing factors
+9. **Report Generation**: Creates Markdown and JSON reports with full evidence
+
+### RTO vs RTA Terminology
+
+- **RTO (Recovery Time Objective)**: The TARGET - maximum acceptable downtime (set in YAML as `rto_target`)
+- **RTA (Recovery Time Actual)**: The MEASURED downtime - actual time from when service went down until it recovered
+- **PASS/FAIL**: Determined by comparing RTA ≤ RTO target
 
 ## Report Output
 
