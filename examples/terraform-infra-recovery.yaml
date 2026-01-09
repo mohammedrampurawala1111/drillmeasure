@@ -1,0 +1,30 @@
+name: terraform-aws-ec2-recovery
+description: |
+  Simulates EC2 instance failure and recovery using Terraform.
+  This scenario destroys the EC2 instance and measures time to recreate it.
+  The instance runs a simple HTTP server on port 3000.
+rto_target: 10m
+disrupt_command: |
+  cd examples/terraform-aws/ec2 && \
+  terraform destroy -target=aws_instance.web -auto-approve
+recover_command: |
+  cd examples/terraform-aws/ec2 && \
+  echo "Recovering infrastructure with Terraform..." && \
+  terraform apply -auto-approve -target=aws_instance.web && \
+  echo "Waiting for instance to boot and service to start..." && \
+  sleep 60
+health_check_command: |
+  cd examples/terraform-aws/ec2 && \
+  INSTANCE_IP=$(terraform output -raw public_ip 2>/dev/null || echo "") && \
+  if [ -z "$INSTANCE_IP" ] || [ "$INSTANCE_IP" = "null" ] || [ "$INSTANCE_IP" = "" ]; then \
+    echo "[Health Check] Instance IP not available yet" >&2 && \
+    exit 1; \
+  fi && \
+  curl -f --max-time 3 --connect-timeout 5 http://$INSTANCE_IP:3000 || exit 1
+post_disrupt_delay: 30s
+factors:
+  log_commands:
+    - cd examples/terraform-aws/ec2 && terraform show -json | jq '.values.root_module.resources[] | select(.type=="aws_instance")'
+    - aws ec2 describe-instances --filters "Name=tag:Name,Values=tf-web-3000" --query 'Reservations[*].Instances[*].[State.Name,LaunchTime,PublicIpAddress]' --output table
+    - cd examples/terraform-aws/ec2 && terraform output -json
+

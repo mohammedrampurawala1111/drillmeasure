@@ -1,0 +1,18 @@
+name: kubernetes-pod-failure-simple
+description: |
+  Simulates a pod failure in Kubernetes and measures recovery time.
+  This is a simpler version that uses kubectl exec instead of creating pods.
+  Requires at least one pod to be running.
+rto_target: 5m
+disrupt_command: kubectl delete pod -l app=webapp -n production --grace-period=0
+health_check_command: |
+  POD=$(kubectl get pod -l app=webapp -n production -o jsonpath='{.items[0].metadata.name}' 2>/dev/null) && \
+  [ -n "$POD" ] && \
+  kubectl exec -n production $POD -- wget -q -O- --timeout=5 http://localhost/health | grep -q healthy || exit 1
+post_disrupt_delay: 10s
+factors:
+  log_commands:
+    - kubectl get events -n production --sort-by='.lastTimestamp' | tail -20
+    - kubectl describe pod -l app=webapp -n production | tail -50
+    - kubectl logs -l app=webapp -n production --tail=100
+

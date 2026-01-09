@@ -1,0 +1,16 @@
+name: kubernetes-pod-failure
+description: |
+  Simulates a pod failure in Kubernetes and measures recovery time.
+  This scenario deletes a pod and monitors when the service becomes healthy again.
+rto_target: 5m
+disrupt_command: kubectl delete pod -l app=webapp -n production --grace-period=0
+health_check_command: |
+  kubectl get pods -l app=webapp -n production -o jsonpath='{.items[*].status.phase}' | grep -q Running && \
+  kubectl run -i --rm --restart=Never curl-test --image=curlimages/curl:latest -- curl -f --max-time 5 http://webapp.production.svc.cluster.local/health || exit 1
+post_disrupt_delay: 10s
+factors:
+  log_commands:
+    - kubectl get events -n production --sort-by='.lastTimestamp' | tail -20
+    - kubectl describe pod -l app=webapp -n production | tail -50
+    - kubectl logs -l app=webapp -n production --tail=100
+

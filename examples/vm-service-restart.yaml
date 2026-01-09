@@ -1,0 +1,15 @@
+name: vm-service-restart
+description: |
+  Measures RTO for a critical service running on a VM.
+  This scenario stops a service via systemd and monitors recovery.
+rto_target: 2m
+disrupt_command: ssh -o StrictHostKeyChecking=no user@web-server.example.com "sudo systemctl stop nginx"
+health_check_command: |
+  ssh -o StrictHostKeyChecking=no user@web-server.example.com "systemctl is-active --quiet nginx" && \
+  curl -f https://web-server.example.com/health || exit 1
+post_disrupt_delay: 5s
+factors:
+  log_commands:
+    - ssh -o StrictHostKeyChecking=no user@web-server.example.com "journalctl -u nginx -n 50 --no-pager"
+    - ssh -o StrictHostKeyChecking=no user@web-server.example.com "systemctl status nginx --no-pager"
+

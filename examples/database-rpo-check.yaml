@@ -1,0 +1,31 @@
+name: database-rpo-check
+description: |
+  Measures both RTO and RPO for a database service.
+  This scenario stops the database, restarts it, and verifies data integrity.
+rto_target: 3m
+rpo_target: 1m
+disrupt_command: |
+  ssh -o StrictHostKeyChecking=no db-admin@db-server.example.com "sudo systemctl stop mysql"
+rpo_check:
+  pre_snapshot: |
+    ssh -o StrictHostKeyChecking=no db-admin@db-server.example.com \
+      "mysqldump -u backup_user -p'$DB_PASSWORD' myapp_db > /tmp/pre-disrupt-snapshot.sql && \
+       sha256sum /tmp/pre-disrupt-snapshot.sql"
+  post_snapshot: |
+    ssh -o StrictHostKeyChecking=no db-admin@db-server.example.com \
+      "mysqldump -u backup_user -p'$DB_PASSWORD' myapp_db > /tmp/post-recovery-snapshot.sql && \
+       sha256sum /tmp/post-recovery-snapshot.sql"
+  verify_command: |
+    ssh -o StrictHostKeyChecking=no db-admin@db-server.example.com \
+      "diff -q /tmp/pre-disrupt-snapshot.sql /tmp/post-recovery-snapshot.sql && \
+       mysql -u backup_user -p'$DB_PASSWORD' myapp_db -e 'SELECT COUNT(*) as record_count FROM transactions WHERE created_at > DATE_SUB(NOW(), INTERVAL 1 HOUR);' | grep -q '^[0-9]*$'"
+health_check_command: |
+  ssh -o StrictHostKeyChecking=no db-admin@db-server.example.com "systemctl is-active --quiet mysql" && \
+  mysql -h db-server.example.com -u health_check -p'$DB_PASSWORD' -e "SELECT 1" > /dev/null 2>&1 || exit 1
+post_disrupt_delay: 10s
+factors:
+  log_commands:
+    - ssh -o StrictHostKeyChecking=no db-admin@db-server.example.com "journalctl -u mysql -n 100 --no-pager"
+    - ssh -o StrictHostKeyChecking=no db-admin@db-server.example.com "mysql -u backup_user -p'$DB_PASSWORD' myapp_db -e 'SHOW MASTER STATUS;'"
+    - ssh -o StrictHostKeyChecking=no db-admin@db-server.example.com "ls -lh /tmp/*snapshot.sql"
+
